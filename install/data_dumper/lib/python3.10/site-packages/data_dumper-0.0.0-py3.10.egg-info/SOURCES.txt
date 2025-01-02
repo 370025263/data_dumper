@@ -1,0 +1,16 @@
+package.xml
+setup.cfg
+setup.py
+../build/data_dumper/data_dumper.egg-info/PKG-INFO
+../build/data_dumper/data_dumper.egg-info/SOURCES.txt
+../build/data_dumper/data_dumper.egg-info/dependency_links.txt
+../build/data_dumper/data_dumper.egg-info/entry_points.txt
+../build/data_dumper/data_dumper.egg-info/requires.txt
+../build/data_dumper/data_dumper.egg-info/top_level.txt
+../build/data_dumper/data_dumper.egg-info/zip-safe
+data_dumper/__init__.py
+data_dumper/gnss_listener.py
+resource/data_dumper
+test/test_copyright.py
+test/test_flake8.py
+test/test_pep257.py

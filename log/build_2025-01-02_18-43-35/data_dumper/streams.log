@@ -1,0 +1,39 @@
+[1.061s] Invoking command in '/home/casia/stone/autoware_data_dumper/data_dumper': PYTHONPATH=/home/casia/stone/autoware_data_dumper/build/data_dumper/prefix_override:/home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 setup.py egg_info --egg-base ../build/data_dumper build --build-base /home/casia/stone/autoware_data_dumper/build/data_dumper/build install --record /home/casia/stone/autoware_data_dumper/build/data_dumper/install.log --single-version-externally-managed
+[1.359s] running egg_info
+[1.359s] creating ../build/data_dumper/data_dumper.egg-info
+[1.360s] writing ../build/data_dumper/data_dumper.egg-info/PKG-INFO
+[1.360s] writing dependency_links to ../build/data_dumper/data_dumper.egg-info/dependency_links.txt
+[1.360s] writing entry points to ../build/data_dumper/data_dumper.egg-info/entry_points.txt
+[1.360s] writing requirements to ../build/data_dumper/data_dumper.egg-info/requires.txt
+[1.360s] writing top-level names to ../build/data_dumper/data_dumper.egg-info/top_level.txt
+[1.360s] writing manifest file '../build/data_dumper/data_dumper.egg-info/SOURCES.txt'
+[1.362s] reading manifest file '../build/data_dumper/data_dumper.egg-info/SOURCES.txt'
+[1.363s] writing manifest file '../build/data_dumper/data_dumper.egg-info/SOURCES.txt'
+[1.363s] running build
+[1.364s] running build_py
+[1.364s] creating /home/casia/stone/autoware_data_dumper/build/data_dumper/build
+[1.364s] creating /home/casia/stone/autoware_data_dumper/build/data_dumper/build/lib
+[1.364s] creating /home/casia/stone/autoware_data_dumper/build/data_dumper/build/lib/data_dumper
+[1.364s] copying data_dumper/gnss_listener.py -> /home/casia/stone/autoware_data_dumper/build/data_dumper/build/lib/data_dumper
+[1.364s] copying data_dumper/__init__.py -> /home/casia/stone/autoware_data_dumper/build/data_dumper/build/lib/data_dumper
+[1.364s] /usr/lib/python3/dist-packages/setuptools/command/install.py:34: SetuptoolsDeprecationWarning: setup.py install is deprecated. Use build and pip and other standards-based tools.
+[1.365s]   warnings.warn(
+[1.365s] running install
+[1.365s] running install_lib
+[1.366s] creating /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages/data_dumper
+[1.366s] copying /home/casia/stone/autoware_data_dumper/build/data_dumper/build/lib/data_dumper/gnss_listener.py -> /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages/data_dumper
+[1.366s] copying /home/casia/stone/autoware_data_dumper/build/data_dumper/build/lib/data_dumper/__init__.py -> /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages/data_dumper
+[1.367s] byte-compiling /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages/data_dumper/gnss_listener.py to gnss_listener.cpython-310.pyc
+[1.367s] byte-compiling /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages/data_dumper/__init__.py to __init__.cpython-310.pyc
+[1.367s] running install_data
+[1.368s] creating /home/casia/stone/autoware_data_dumper/install/data_dumper/share/ament_index
+[1.368s] creating /home/casia/stone/autoware_data_dumper/install/data_dumper/share/ament_index/resource_index
+[1.368s] creating /home/casia/stone/autoware_data_dumper/install/data_dumper/share/ament_index/resource_index/packages
+[1.368s] copying resource/data_dumper -> /home/casia/stone/autoware_data_dumper/install/data_dumper/share/ament_index/resource_index/packages
+[1.368s] copying package.xml -> /home/casia/stone/autoware_data_dumper/install/data_dumper/share/data_dumper
+[1.368s] running install_egg_info
+[1.370s] Copying ../build/data_dumper/data_dumper.egg-info to /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages/data_dumper-0.0.0-py3.10.egg-info
+[1.371s] running install_scripts
+[1.394s] Installing gnss_listener script to /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/data_dumper
+[1.394s] writing list of installed files to '/home/casia/stone/autoware_data_dumper/build/data_dumper/install.log'
+[1.416s] Invoked command in '/home/casia/stone/autoware_data_dumper/data_dumper' returned '0': PYTHONPATH=/home/casia/stone/autoware_data_dumper/build/data_dumper/prefix_override:/home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 setup.py egg_info --egg-base ../build/data_dumper build --build-base /home/casia/stone/autoware_data_dumper/build/data_dumper/build install --record /home/casia/stone/autoware_data_dumper/build/data_dumper/install.log --single-version-externally-managed

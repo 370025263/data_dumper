@@ -1,0 +1,37 @@
+running egg_info
+creating ../build/data_dumper/data_dumper.egg-info
+writing ../build/data_dumper/data_dumper.egg-info/PKG-INFO
+writing dependency_links to ../build/data_dumper/data_dumper.egg-info/dependency_links.txt
+writing entry points to ../build/data_dumper/data_dumper.egg-info/entry_points.txt
+writing requirements to ../build/data_dumper/data_dumper.egg-info/requires.txt
+writing top-level names to ../build/data_dumper/data_dumper.egg-info/top_level.txt
+writing manifest file '../build/data_dumper/data_dumper.egg-info/SOURCES.txt'
+reading manifest file '../build/data_dumper/data_dumper.egg-info/SOURCES.txt'
+writing manifest file '../build/data_dumper/data_dumper.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /home/casia/stone/autoware_data_dumper/build/data_dumper/build
+creating /home/casia/stone/autoware_data_dumper/build/data_dumper/build/lib
+creating /home/casia/stone/autoware_data_dumper/build/data_dumper/build/lib/data_dumper
+copying data_dumper/gnss_listener.py -> /home/casia/stone/autoware_data_dumper/build/data_dumper/build/lib/data_dumper
+copying data_dumper/__init__.py -> /home/casia/stone/autoware_data_dumper/build/data_dumper/build/lib/data_dumper
+/usr/lib/python3/dist-packages/setuptools/command/install.py:34: SetuptoolsDeprecationWarning: setup.py install is deprecated. Use build and pip and other standards-based tools.
+  warnings.warn(
+running install
+running install_lib
+creating /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages/data_dumper
+copying /home/casia/stone/autoware_data_dumper/build/data_dumper/build/lib/data_dumper/gnss_listener.py -> /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages/data_dumper
+copying /home/casia/stone/autoware_data_dumper/build/data_dumper/build/lib/data_dumper/__init__.py -> /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages/data_dumper
+byte-compiling /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages/data_dumper/gnss_listener.py to gnss_listener.cpython-310.pyc
+byte-compiling /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages/data_dumper/__init__.py to __init__.cpython-310.pyc
+running install_data
+creating /home/casia/stone/autoware_data_dumper/install/data_dumper/share/ament_index
+creating /home/casia/stone/autoware_data_dumper/install/data_dumper/share/ament_index/resource_index
+creating /home/casia/stone/autoware_data_dumper/install/data_dumper/share/ament_index/resource_index/packages
+copying resource/data_dumper -> /home/casia/stone/autoware_data_dumper/install/data_dumper/share/ament_index/resource_index/packages
+copying package.xml -> /home/casia/stone/autoware_data_dumper/install/data_dumper/share/data_dumper
+running install_egg_info
+Copying ../build/data_dumper/data_dumper.egg-info to /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/python3.10/site-packages/data_dumper-0.0.0-py3.10.egg-info
+running install_scripts
+Installing gnss_listener script to /home/casia/stone/autoware_data_dumper/install/data_dumper/lib/data_dumper
+writing list of installed files to '/home/casia/stone/autoware_data_dumper/build/data_dumper/install.log'
