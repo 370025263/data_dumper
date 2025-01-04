@@ -1,12 +1,12 @@
 Metadata-Version: 2.1
-Name: data-dumper
-Version: 0.0.0
-Summary: TODO: Package description
-Home-page: UNKNOWN
+Name: data_dumper
+Version: 0.1.0
+Summary: A ROS 2 package for GNSS data processing and database interaction.
 Maintainer: casia
 Maintainer-email: 15810012030@163.com
-License: TODO: License declaration
-Platform: UNKNOWN
-
-UNKNOWN
-
+License: Apache License 2.0
+Requires-Dist: setuptools
+Requires-Dist: mysql-connector-python
+Requires-Dist: rclpy
+Provides-Extra: test
+Requires-Dist: pytest; extra == "test"

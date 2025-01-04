@@ -1,3 +1,18 @@
+"""
+README
+
+添加新的表的方法:
+1.添加订阅topic
+2.为topic的消息写一个回调(更新DataManager)
+3.从Config和DataManager中写入数据到Mysql表（如果有新的默认字段记得根性Config)
+
+HINTS:
+- Config中保存了一些默认数值，用于多个表之间公用。
+- DataManager负责一些需要保证表间同步的字段。
+
+
+"""
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix  # 导入 NavSatFix 消息类型
@@ -26,7 +41,7 @@ class Config:
         'latitude_default': 0.0,
         'user_domain': 'default_domain',
         'user_query_domain': 'default_query_domain',
-        'status': 'active',
+        'status': 'valid',
         'terminal_code': 'UNKNOWN_TERMINAL',
         'vehicle_type': 'UNKNOWN_TYPE',
         'flag': 'N',
@@ -59,7 +74,7 @@ class Listener(Node):
     Designed for scalability and reusability.
     """
     def __init__(self, interval=5):
-        super().__init__('data_listener')  # 初始化节点，节点名称为 'data_listener'
+        super().__init__('data_dumper')  # 初始化节点，节点名称为 'data_dumper'
         self.data_manager = DataManager()
         self.config = Config()
         self.insert_functions: Dict[str, Callable[[datetime], None]] = {}

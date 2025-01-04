@@ -1,1 +1,6 @@
 setuptools
+mysql-connector-python
+rclpy
+
+[test]
+pytest
