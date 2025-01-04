@@ -16,6 +16,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix  # 导入 NavSatFix 消息类型
 from nav_msgs.msg import Odometry  # 导入 Odometry 消息类型
 from autoware_planning_msgs.msg import Trajectory  # 导入 Trajectory 消息类型
+from autoware_vehicle_msgs.msg import SteeringReport  # 导入 SteeringReport 消息类型
 import mysql.connector
 from datetime import datetime
 from typing import Callable, Dict, Any
@@ -71,6 +72,15 @@ class Config:
         'event_type_default': 'EVENT_TYPE_001',
         'event_record_complete_flag_default': 'Y',
         'vehicle_heading_angle_default': 0.0,  # 改为数值类型
+        # 新增驾驶员操作及状态表的默认值
+        'takeover_capability_default': 'UNKNOWN',
+        'wear_seat_belt_flag_default': 'N',
+        'driving_position_flag_default': 'N',
+        'accelerator_pedal_angle_default': '0.0',
+        'brake_pedal_angle_default': '0.0',
+        'brake_pedal_status_default': 'OFF',
+        'steering_wheel_angle_default': '0.0',
+        'steering_torque_default': '0.0',
     }
 
 class DataManager:
@@ -134,6 +144,14 @@ class Listener(Node):
             10)
         self.odometry_subscription  # 防止未使用变量的警告
 
+        # 新增驾驶员操作及状态信息 Subscriber
+        self.steering_status_subscription = self.create_subscription(
+            SteeringReport,  # SteeringReport 消息类型
+            '/vehicle/status/steering_status',
+            self.steering_status_callback,
+            10)
+        self.steering_status_subscription  # 防止未使用变量的警告
+
         # TODO: 添加更多的订阅者，例如：
         # self.other_subscription = self.create_subscription(
         #     OtherMsgType,
@@ -153,7 +171,7 @@ class Listener(Node):
         Callback function for Trajectory data. Stores the latest message.
         """
         self.data_manager.update_message('trajectory', msg)
-        self.get_logger().info('Received new Trajectory data.')
+        self.get_logger().debug('Received new Trajectory data.')
 
     def odometry_callback(self, msg: Odometry):
         """
@@ -161,6 +179,13 @@ class Listener(Node):
         """
         self.data_manager.update_message('odometry', msg)
         self.get_logger().debug('Received Odometry data.')
+
+    def steering_status_callback(self, msg: SteeringReport):
+        """
+        Callback function for Steering Status data. Stores the latest message.
+        """
+        self.data_manager.update_message('steering_status', msg)
+        self.get_logger().debug('Received Steering Status data.')
 
     # TODO: 添加更多的回调函数
     # def other_callback(self, msg: OtherMsgType):
@@ -173,6 +198,7 @@ class Listener(Node):
         self.insert_functions['gnss'] = self.insert_gnss_data_to_mysql
         self.insert_functions['trajectory'] = self.insert_trajectory_data_to_mysql
         self.insert_functions['odometry'] = self.insert_odometry_to_mysql
+        self.insert_functions['steering_status'] = self.insert_steering_status_to_mysql  # 注册新的插入函数
         # TODO: 添加更多的插入函数，例如：
         # self.insert_functions['other'] = self.insert_other_data_to_mysql
 
@@ -208,7 +234,7 @@ class Listener(Node):
             )
 
             data = (
-                current_id,  # guid（当前时间戳）
+                current_id,  # id（当前时间戳）
                 self.config.DEFAULTS['detection_id'],     # detection_id
                 self.config.DEFAULTS['vehicle_vin'],      # vehicle_vin
                 self.config.DEFAULTS['vehicle_plate'],    # vehicle_plate
@@ -269,7 +295,7 @@ class Listener(Node):
             )
 
             data = (
-                current_id,  # guid（当前时间戳）
+                current_id,  # id（当前时间戳）
                 self.config.DEFAULTS['vehicle_id'],        # vehicle_id
                 self.config.DEFAULTS['vehicle_plate'],     # vehicle_plate
                 self.config.DEFAULTS['creater'],          # creater
@@ -366,6 +392,61 @@ class Listener(Node):
         except mysql.connector.Error as err:
             # 捕获 MySQL 错误并打印日志
             self.get_logger().error(f"Failed to write Odometry data to MySQL: {err}")
+            # 可以根据需求选择是否采取进一步措施，例如重试或报警
+
+        finally:
+            # 确保关闭数据库连接和游标
+            if connection.is_connected():
+                cursor.close()
+                connection.close()
+
+    def insert_steering_status_to_mysql(self, current_id: int):
+        """
+        Inserts the latest Steering Status data into the MySQL database using a synchronized timestamp as ID.
+        """
+        msg: SteeringReport = self.data_manager.get_latest_message('steering_status')
+        if msg is None:
+            self.get_logger().warning('No Steering Status data available to insert.')
+            return
+
+        try:
+            # 建立数据库连接
+            connection = mysql.connector.connect(**self.config.DB_CONFIG)
+            cursor = connection.cursor()
+
+            # 插入数据的 SQL 语句，包含所有字段
+            sql = (
+                "INSERT INTO `驾驶员操作及状态信息表` ("
+                "id, data_uuid, vin, takeover_capability, wear_seat_belt_flag, driving_position_flag, "
+                "accelerator_pedal_angle, brake_pedal_angle, brake_pedal_status, steering_wheel_angle, "
+                "steering_torque, create_time, modify_time"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            )
+
+            data = (
+                current_id,  # id（当前时间戳）
+                self.config.DEFAULTS['data_uuid_default'],          # data_uuid
+                self.config.DEFAULTS['vin_default'],                # vin
+                self.config.DEFAULTS['takeover_capability_default'], # takeover_capability
+                self.config.DEFAULTS['wear_seat_belt_flag_default'], # wear_seat_belt_flag
+                self.config.DEFAULTS['driving_position_flag_default'], # driving_position_flag
+                self.config.DEFAULTS['accelerator_pedal_angle_default'], # accelerator_pedal_angle
+                self.config.DEFAULTS['brake_pedal_angle_default'],   # brake_pedal_angle
+                self.config.DEFAULTS['brake_pedal_status_default'],  # brake_pedal_status
+                str(msg.steering_tire_angle) if msg.steering_tire_angle is not None else self.config.DEFAULTS['steering_wheel_angle_default'],  # steering_wheel_angle
+                self.config.DEFAULTS['steering_torque_default'],    # steering_torque
+                datetime.fromtimestamp(current_id / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
+                datetime.fromtimestamp(current_id / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f'),  # modify_time
+            )
+
+            # 执行插入操作
+            cursor.execute(sql, data)
+            connection.commit()  # 提交事务
+            self.get_logger().info('Steering Status data inserted into MySQL.')
+
+        except mysql.connector.Error as err:
+            # 捕获 MySQL 错误并打印日志
+            self.get_logger().error(f"Failed to write Steering Status data to MySQL: {err}")
             # 可以根据需求选择是否采取进一步措施，例如重试或报警
 
         finally:
