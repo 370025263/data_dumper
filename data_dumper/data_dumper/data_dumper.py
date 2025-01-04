@@ -4,21 +4,22 @@ README
 添加新的表的方法:
 1.添加订阅topic
 2.为topic的消息写一个回调(更新DataManager)
-3.从Config和DataManager中写入数据到Mysql表（如果有新的默认字段记得根性Config)
+3.从Config和DataManager中写入数据到Mysql表（如果有新的默认字段记得更新Config)
 
 HINTS:
 - Config中保存了一些默认数值，用于多个表之间公用。
 - DataManager负责一些需要保证表间同步的字段。
-
-
 """
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix  # 导入 NavSatFix 消息类型
+from std_msgs.msg import Header
+from autoware_planning_msgs.msg import TrajectoryPoint
 import mysql.connector
 from datetime import datetime
 from typing import Callable, Dict, Any
+import json
 
 class Config:
     """
@@ -46,7 +47,19 @@ class Config:
         'vehicle_type': 'UNKNOWN_TYPE',
         'flag': 'N',
         'creater': 'system',
-        'modifer': 'system'
+        'modifer': 'system',
+        # 新增默认值（如果有）
+        'vehicle_id': 'VEHICLE-001',  # 根据实际情况修改
+        'start_time_default': None,
+        'end_time_default': None,
+        'duration_default': None,
+        'path_default': None,
+        'terminal_sim_default': 'UNKNOWN_SIM',
+        'factory_default': 'UNKNOWN_FACTORY',
+        'task_code_default': 'TASK-001',
+        'driver_default': 'UNKNOWN_DRIVER',
+        'contacts_name_default': 'UNKNOWN',
+        'vehicle_guid_default': 'UNKNOWN_GUID'
     }
 
 class DataManager:
@@ -94,6 +107,14 @@ class Listener(Node):
             10)
         self.gnss_subscription  # 防止未使用变量的警告
 
+        # Trajectory Subscriber
+        self.trajectory_subscription = self.create_subscription(
+            TrajectoryPoint,
+            '/planning/scenario_planning/trajectory',
+            self.trajectory_callback,
+            10)
+        self.trajectory_subscription  # 防止未使用变量的警告
+
         # TODO: 添加更多的订阅者，例如：
         # self.other_subscription = self.create_subscription(
         #     OtherMsgType,
@@ -108,6 +129,15 @@ class Listener(Node):
         self.data_manager.update_message('gnss', msg)
         self.get_logger().debug('Received GNSS data.')
 
+    def trajectory_callback(self, msg: TrajectoryPoint):
+        """
+        Callback function for Trajectory data. Stores the latest message.
+        """
+        # 因为 Trajectory 是一个包含多个 TrajectoryPoint 的数组，假设我们接收到整个轨迹
+        # 这里需要根据实际的消息类型调整
+        self.data_manager.update_message('trajectory', msg)
+        self.get_logger().debug('Received Trajectory data.')
+
     # TODO: 添加更多的回调函数
     # def other_callback(self, msg: OtherMsgType):
     #     self.data_manager.update_message('other', msg)
@@ -117,6 +147,7 @@ class Listener(Node):
         Registers database insert functions.
         """
         self.insert_functions['gnss'] = self.insert_gnss_data_to_mysql
+        self.insert_functions['trajectory'] = self.insert_trajectory_data_to_mysql
         # TODO: 添加更多的插入函数，例如：
         # self.insert_functions['other'] = self.insert_other_data_to_mysql
 
@@ -178,14 +209,133 @@ class Listener(Node):
         except mysql.connector.Error as err:
             # 捕获 MySQL 错误并打印日志
             self.get_logger().error(f"Failed to write GNSS data to MySQL: {err}")
-            # 根据需求决定是否退出程序，这里选择不退出
-            # raise SystemExit(1)
+            # 可以根据需求选择是否采取进一步措施，例如重试或报警
 
         finally:
             # 确保关闭数据库连接和游标
             if connection.is_connected():
                 cursor.close()
                 connection.close()
+
+    def insert_trajectory_data_to_mysql(self, current_time: datetime):
+        """
+        Inserts the latest Trajectory data into the MySQL database using a synchronized timestamp.
+        """
+        msg: TrajectoryPoint = self.data_manager.get_latest_message('trajectory')
+        if msg is None:
+            self.get_logger().warning('No Trajectory data available to insert.')
+            return
+
+        try:
+            # 建立数据库连接
+            connection = mysql.connector.connect(**self.config.DB_CONFIG)
+            cursor = connection.cursor()
+
+            # 将轨迹点序列化为 JSON
+            trajectory_json = json.dumps(self.serialize_trajectory(msg), ensure_ascii=False)
+
+            # 插入数据的 SQL 语句，包含所有字段
+            sql = (
+                "INSERT INTO `车辆定位信息轨迹表` ("
+                "guid, vehicle_id, vehicle_plate, creater, create_time, modify_time, modifer, flag, "
+                "user_domain, user_query_domain, status, start_time, end_time, duration, path, "
+                "vehicle_vin, terminal_sim, factory, mileage, task_code, driver, contacts_name, vehicle_guid"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            )
+
+            data = (
+                current_time.strftime('%Y%m%d%H%M%S%f'),  # GUID
+                self.config.DEFAULTS['vehicle_id'],        # vehicle_id
+                self.config.DEFAULTS['vehicle_plate'],     # vehicle_plate
+                self.config.DEFAULTS['creater'],          # creater
+                current_time.strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
+                self.config.DEFAULTS['modify_time_default'],    # modify_time (默认值)
+                self.config.DEFAULTS['modifer'],           # modifer
+                self.config.DEFAULTS['flag'],              # flag
+                self.config.DEFAULTS['user_domain'],       # user_domain
+                self.config.DEFAULTS['user_query_domain'], # user_query_domain
+                self.config.DEFAULTS['status'],            # status
+                self.config.DEFAULTS['start_time_default'],# start_time
+                self.config.DEFAULTS['end_time_default'],  # end_time
+                self.config.DEFAULTS['duration_default'],  # duration
+                trajectory_json,                            # path
+                self.config.DEFAULTS['vehicle_vin'],       # vehicle_vin
+                self.config.DEFAULTS['terminal_sim_default'],# terminal_sim
+                self.config.DEFAULTS['factory_default'],    # factory
+                None,                                       # mileage (填NULL)
+                self.config.DEFAULTS['task_code_default'], # task_code
+                self.config.DEFAULTS['driver_default'],    # driver
+                self.config.DEFAULTS['contacts_name_default'], # contacts_name
+                self.config.DEFAULTS['vehicle_guid_default']   # vehicle_guid
+            )
+
+            # 执行插入操作
+            cursor.execute(sql, data)
+            connection.commit()  # 提交事务
+            self.get_logger().info('Trajectory data inserted into MySQL.')
+
+        except mysql.connector.Error as err:
+            # 捕获 MySQL 错误并打印日志
+            self.get_logger().error(f"Failed to write Trajectory data to MySQL: {err}")
+            # 可以根据需求选择是否采取进一步措施，例如重试或报警
+
+        finally:
+            # 确保关闭数据库连接和游标
+            if connection.is_connected():
+                cursor.close()
+                connection.close()
+
+    def serialize_trajectory(self, msg: TrajectoryPoint) -> Dict[str, Any]:
+        """
+        Serializes the TrajectoryPoint message into a dictionary suitable for JSON storage.
+        """
+        # 根据实际的消息结构进行序列化
+        # 这里假设 msg 是一个 autoware_planning_msgs/msg/TrajectoryPoint 类型的消息
+        # 如果 msg 实际上是一个包含多个 TrajectoryPoint 的消息，需要调整此函数
+
+        # 示例序列化（需要根据实际消息类型调整）
+        serialized = {
+            'header': {
+                'stamp': {
+                    'sec': msg.header.stamp.sec,
+                    'nanosec': msg.header.stamp.nanosec
+                },
+                'frame_id': msg.header.frame_id
+            },
+            'points': []
+        }
+
+        # 假设 msg.points 是一个 TrajectoryPoint 数组
+        # 需要遍历并序列化每个 TrajectoryPoint
+        for point in msg.points:
+            serialized_point = {
+                'time_from_start': {
+                    'sec': point.time_from_start.sec,
+                    'nanosec': point.time_from_start.nanosec
+                },
+                'pose': {
+                    'position': {
+                        'x': point.pose.position.x,
+                        'y': point.pose.position.y,
+                        'z': point.pose.position.z
+                    },
+                    'orientation': {
+                        'x': point.pose.orientation.x,
+                        'y': point.pose.orientation.y,
+                        'z': point.pose.orientation.z,
+                        'w': point.pose.orientation.w
+                    }
+                },
+                'longitudinal_velocity_mps': point.longitudinal_velocity_mps,
+                'lateral_velocity_mps': point.lateral_velocity_mps,
+                'acceleration_mps2': point.acceleration_mps2,
+                'heading_rate_rps': point.heading_rate_rps,
+                'front_wheel_angle_rad': point.front_wheel_angle_rad,
+                'rear_wheel_angle_rad': point.rear_wheel_angle_rad
+            }
+            serialized['points'].append(serialized_point)
+
+        return serialized
 
     # TODO: 可以在这里添加更多的插入函数
     # def insert_other_data_to_mysql(self, current_time: datetime):
