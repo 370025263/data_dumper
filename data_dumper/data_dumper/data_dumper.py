@@ -1,27 +1,48 @@
+#!/usr/bin/env python3
 """
 README
 
-添加新的表的方法:
-1. 添加订阅topic
-2. 为topic的消息写一个回调(更新DataManager)
-3. 从Config和DataManager中写入数据到Mysql表（如果有新的默认字段记得更新Config)
+功能：
+1. 订阅各个ROS话题。
+2. 当单个话题有新消息时，立即将其数据写入对应的MySQL表。
+3. 对于由多个话题组成的表（定位表、控制表），任何一个构成话题有新消息时，立即将整个表的数据写入MySQL，使用所有相关话题的最新数据。
+4. 移除驾驶员操作及状态信息表，仅保留六个表。
+5. 使用数据库连接池优化MySQL连接管理。
 
-HINTS:
-- Config中保存了一些默认数值，用于多个表之间公用。
-- DataManager负责一些需要保证表间同步的字段。
+使用方法：
+1. 确保已安装必要的Python库：
+    ```bash
+    pip install rclpy mysql-connector-python
+    ```
+2. 根据实际情况修改Config类中的数据库配置和默认值。
+3. 确保MySQL中已创建所需的六个表，且字段类型与代码中的插入逻辑一致。
+4. 启动ROS 2节点：
+    ```bash
+    python3 data_dumper.py
+    ```
 """
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import NavSatFix  # 导入 NavSatFix 消息类型
-from nav_msgs.msg import Odometry  # 导入 Odometry 消息类型
-from autoware_planning_msgs.msg import Trajectory  # 导入 Trajectory 消息类型
-from autoware_vehicle_msgs.msg import SteeringReport  # 导入 SteeringReport 消息类型
+from sensor_msgs.msg import NavSatFix, Imu
+from nav_msgs.msg import Odometry
+from autoware_planning_msgs.msg import Trajectory
+from autoware_perception_msgs.msg import PredictedObjects, TrafficLightGroupArray
+from autoware_vehicle_msgs.msg import (
+    VelocityReport,
+    GearReport,
+    SteeringReport,
+    TurnIndicatorsCommand,
+    HazardLightsCommand
+)
+from autoware_control_msgs.msg import Control
+from tier4_vehicle_msgs.msg import VehicleEmergencyStamped
 import mysql.connector
+from mysql.connector import pooling
 from datetime import datetime
-from typing import Callable, Dict, Any
-import json
+from typing import Any, Dict
 import math
+import threading
 
 class Config:
     """
@@ -35,425 +56,705 @@ class Config:
         'database': 'test'  # 替换为实际的数据库名称
     }
 
+    # 创建数据库连接池
+    DB_POOL = pooling.MySQLConnectionPool(
+        pool_name="mypool",
+        pool_size=10,
+        **DB_CONFIG
+    )
+
     # Default values
     DEFAULTS = {
-        'detection_id': 'DET-001',
-        'vehicle_vin': 'GNSS-VIN-001',
-        'vehicle_plate': 'UNKNOWN',
-        'longitude_default': 0.0,
-        'latitude_default': 0.0,
-        'user_domain': 'default_domain',
-        'user_query_domain': 'default_query_domain',
-        'status': 'valid',
-        'terminal_code': 'UNKNOWN_TERMINAL',
-        'vehicle_type': 'UNKNOWN_TYPE',
-        'flag': 'N',
-        'creater': 'system',
-        'modifer': 'system',
-        # 新增默认值
-        'vehicle_id': 'VEHICLE-001',  # 根据实际情况修改
-        'start_time_default': None,
-        'end_time_default': None,
-        'duration_default': None,
-        'path_default': None,
-        'terminal_sim_default': 'UNKNOWN_SIM',
-        'factory_default': 'UNKNOWN_FACTORY',
-        'task_code_default': 'TASK-001',
-        'driver_default': 'UNKNOWN_DRIVER',
-        'contacts_name_default': 'UNKNOWN',
-        'vehicle_guid_default': 'UNKNOWN_GUID',
-        # 新增表的默认值
-        'data_uuid_default': 'DATA_UUID_001',
-        'vin_default': 'VIN_001',
-        'event_time_default': '2025-01-04T00:00:00',  # 根据实际需求调整
-        'automatic_driving_data_recording_system_hardware_version_default': 'v1.0',
-        'automatic_driving_data_recording_system_serial_num_default': 'SN001',
-        'automatic_driving_data_recording_system_software_version_default': 'SW1.0',
-        'event_type_default': 'EVENT_TYPE_001',
-        'event_record_complete_flag_default': 'Y',
-        'vehicle_heading_angle_default': 0.0,  # 改为数值类型
-        # 新增驾驶员操作及状态表的默认值
-        'takeover_capability_default': 'UNKNOWN',
-        'wear_seat_belt_flag_default': 'N',
-        'driving_position_flag_default': 'N',
-        'accelerator_pedal_angle_default': '0.0',
-        'brake_pedal_angle_default': '0.0',
-        'brake_pedal_status_default': 'OFF',
-        'steering_wheel_angle_default': '0.0',
-        'steering_torque_default': '0.0',
+        'vehicle_vin_code_default': 123456,  # 根据实际车辆 VIN 代码调整
+        'data_type_predicted_objects': 'PredictedObjects',
+        'data_type_traffic_light_groups': 'TrafficLightGroupArray',
+        'data_type_localization': 'Localization',
+        'data_type_control': 'Control',
+        'data_type_decision_planning': 'DecisionPlanning',
+        'data_type_chassis': 'Chassis',
+        # 激光雷达障碍物感知表的默认值
+        'type_default': 'UNKNOWN',
+        # 信号灯感知表的默认值
+        'color_default': 'UNKNOWN',
+        'shape_default': 'UNKNOWN',
+        'status_default': 'UNKNOWN',
+        'confidence_default': '0.0',
+        # 定位表的默认值
+        'vehicle_heading_angle_default': '0.0',
+        'lon_default': '0.0',
+        'lat_default': '0.0',
+        'lateral_acceleration_default': '0.0',
+        'longitudinal_acceleration_default': '0.0',
+        'gnss_state_default': 'UNKNOWN',
+        'imu_state_default': 'UNKNOWN',
+        'x_default': '0.0',
+        'y_default': '0.0',
+        'z_default': '0.0',
+        'o_lon_default': '119.69281743',
+        'o_lat_default': '25.4804208',
+        'o_h_default': '36.488',
+        # 控制表的默认值
+        'gear_default': 'N',
+        'steering_tire_angle_default': '0.0',
+        'turn_light_default': 'OFF',
+        'hazard_light_default': 'OFF',
+        'drive_mode_default': 'MANUAL',
+        'emergency_default': 'OFF',
+        # 决策规划表的默认值
+        'p_id_default': '0',
+        # 底盘表的默认值
+        'longitudinal_velocity_default': '0.0',
+        'lateral_velocity_default': '0.0',
+        'heading_rate_default': '0.0',
     }
-
-class DataManager:
-    """
-    Manages the latest messages received from various topics.
-    """
-    def __init__(self):
-        self.latest_messages: Dict[str, Any] = {}
-
-    def update_message(self, topic: str, msg: Any):
-        """
-        Updates the latest message for a given topic.
-        """
-        self.latest_messages[topic] = msg
-
-    def get_latest_message(self, topic: str):
-        """
-        Retrieves the latest message for a given topic.
-        """
-        return self.latest_messages.get(topic, None)
 
 class Listener(Node):
     """
     ROS 2 Node that listens to various data topics and inserts data into MySQL.
-    Designed for scalability and reusability.
+    Designed for immediate insertion upon message reception.
     """
-    def __init__(self, interval=5):
+    def __init__(self):
         super().__init__('data_dumper')  # 初始化节点，节点名称为 'data_dumper'
-        self.data_manager = DataManager()
         self.config = Config()
-        self.insert_functions: Dict[str, Callable[[int], None]] = {}
+        self.latest_messages: Dict[str, Any] = {}
+        self.lock = threading.Lock()
         self.setup_subscribers()
-        self.setup_insert_functions()
-        self.timer = self.create_timer(interval, self.timer_callback)  # 使用 ROS 定时器
 
     def setup_subscribers(self):
         """
         Sets up subscribers for various ROS topics.
         """
-        # GNSS Subscriber
-        self.gnss_subscription = self.create_subscription(
-            NavSatFix,
-            '/sensing/gnss/monitor',
-            self.gnss_callback,
+        # 激光雷达障碍物感知表 Subscriber
+        self.predicted_objects_subscription = self.create_subscription(
+            PredictedObjects,
+            '/perception/object_recognition/objects',
+            self.predicted_objects_callback,
             10)
-        self.gnss_subscription  # 防止未使用变量的警告
+        self.predicted_objects_subscription  # 防止未使用变量的警告
 
-        # Trajectory Subscriber
-        self.trajectory_subscription = self.create_subscription(
-            Trajectory,  # 修改为 Trajectory 消息类型
-            '/planning/scenario_planning/trajectory',
-            self.trajectory_callback,
+        # 信号灯感知表 Subscriber
+        self.traffic_light_groups_subscription = self.create_subscription(
+            TrafficLightGroupArray,
+            '/perception/traffic_light_recognition/traffic_signals',
+            self.traffic_light_groups_callback,
             10)
-        self.trajectory_subscription  # 防止未使用变量的警告
+        self.traffic_light_groups_subscription  # 防止未使用变量的警告
 
-        # Odometry Subscriber
+        # 定位表 Subscribers
         self.odometry_subscription = self.create_subscription(
             Odometry,
             '/localization/kinematic_state',
             self.odometry_callback,
             10)
-        self.odometry_subscription  # 防止未使用变量的警告
+        self.odometry_subscription
 
-        # 新增驾驶员操作及状态信息 Subscriber
+        self.gnss_subscription = self.create_subscription(
+            NavSatFix,
+            '/sensing/gnss/monitor',
+            self.gnss_callback,
+            10)
+        self.gnss_subscription
+
+        self.imu_subscription = self.create_subscription(
+            Imu,
+            '/sensing/imu/imu_raw',
+            self.imu_callback,
+            10)
+        self.imu_subscription
+
+        # 控制表 Subscribers
+        self.gear_status_subscription = self.create_subscription(
+            GearReport,
+            '/vehicle/status/gear_status',
+            self.gear_status_callback,
+            10)
+        self.gear_status_subscription
+
         self.steering_status_subscription = self.create_subscription(
-            SteeringReport,  # SteeringReport 消息类型
+            SteeringReport,
             '/vehicle/status/steering_status',
             self.steering_status_callback,
             10)
-        self.steering_status_subscription  # 防止未使用变量的警告
+        self.steering_status_subscription
 
-        # TODO: 添加更多的订阅者，例如：
-        # self.other_subscription = self.create_subscription(
-        #     OtherMsgType,
-        #     '/sensing/other/topic',
-        #     self.other_callback,
-        #     10)
+        self.control_cmd_subscription = self.create_subscription(
+            Control,
+            '/control/command/control_cmd',
+            self.control_cmd_callback,
+            10)
+        self.control_cmd_subscription
+
+        self.turn_indicators_cmd_subscription = self.create_subscription(
+            TurnIndicatorsCommand,
+            '/control/command/turn_indicators_cmd',
+            self.turn_indicators_cmd_callback,
+            10)
+        self.turn_indicators_cmd_subscription
+
+        self.hazard_lights_cmd_subscription = self.create_subscription(
+            HazardLightsCommand,
+            '/control/command/hazard_lights_cmd',
+            self.hazard_lights_cmd_callback,
+            10)
+        self.hazard_lights_cmd_subscription
+
+        # 决策规划表 Subscriber
+        self.planning_trajectory_subscription = self.create_subscription(
+            Trajectory,
+            '/planning/scenario_planning/trajectory',
+            self.planning_trajectory_callback,
+            10)
+        self.planning_trajectory_subscription
+
+        # 底盘表 Subscriber
+        self.velocity_status_subscription = self.create_subscription(
+            VelocityReport,  # 替换为实际的消息类型
+            '/vehicle/status/velocity_status',
+            self.velocity_status_callback,
+            10)
+        self.velocity_status_subscription
+
+    # --------------- 回调函数和写入函数 ---------------
+
+    # 激光雷达障碍物感知表 Callback
+    def predicted_objects_callback(self, msg: PredictedObjects):
+        """
+        Callback function for Predicted Objects data. Inserts data into MySQL.
+        Splits the list of obstacles into multiple records.
+        """
+        with self.lock:
+            self.latest_messages['/perception/object_recognition/objects'] = msg
+
+        if not msg.objects:
+            self.get_logger().warning('Received PredictedObjects message with no objects.')
+            return
+
+        try:
+            connection = self.config.DB_POOL.get_connection()
+            cursor = connection.cursor()
+
+            sql = (
+                "INSERT INTO `激光雷达障碍物感知表` ("
+                "vehicle_vin_code, data_type, data_date, create_time, timestamp, obstacle_id, type, "
+                "pos_x, pos_y, height, width, length"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            )
+
+            for obstacle in msg.objects:
+                obstacle_id = str(obstacle.object_id) # 假设 `object_id` 是唯一标识符
+                data = (
+                    Config.DEFAULTS['vehicle_vin_code_default'],  # vehicle_vin_code
+                    Config.DEFAULTS['data_type_predicted_objects'],  # data_type
+                    datetime.now().date(),  # data_date
+                    datetime.fromtimestamp(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
+                    f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec}",  # timestamp
+                    obstacle_id,  # obstacle_id
+                    obstacle.classification[0].label if obstacle.classification[0].label else Config.DEFAULTS['type_default'],  # type. 
+                    # TODO:表中添加一个obstacle.classification.probability
+                    # ObjectClassification[] classification
+                    str(obstacle.kinematics.initial_pose_with_covariance.pose.position.x),  # pos_x
+                    str(obstacle.kinematics.initial_pose_with_covariance.pose.position.y),  # pos_y
+                    str(obstacle.shape.dimensions.z),  # height
+                    str(obstacle.shape.dimensions.y),  # width
+                    str(obstacle.shape.dimensions.x),  # length
+                )
+                cursor.execute(sql, data)
+
+            connection.commit()
+            self.get_logger().info('PredictedObjects data inserted into MySQL.')
+
+        except mysql.connector.Error as err:
+            self.get_logger().error(f"Failed to write PredictedObjects data to MySQL: {err}")
+
+        finally:
+            if connection.is_connected():
+                cursor.close()
+                connection.close()
+
+    # 信号灯感知表 Callback
+    def traffic_light_groups_callback(self, msg: TrafficLightGroupArray):
+        """
+        Callback function for Traffic Light Groups data. Inserts data into MySQL.
+        Splits the list of traffic lights into multiple records.
+        """
+        with self.lock:
+            self.latest_messages['/perception/traffic_light_recognition/traffic_signals'] = msg
+
+        if not msg.traffic_light_groups:
+            print(msg.traffic_light_groups)
+            self.get_logger().warning('Received TrafficLightGroupArray message with no groups.')
+            return
+
+        try:
+            connection = self.config.DB_POOL.get_connection()
+            cursor = connection.cursor()
+
+            sql = (
+                "INSERT INTO `信号灯感知表` ("
+                "vehicle_vin_code, data_type, data_date, create_time, timestamp, traffic_light_group_id, "
+                "element_id, color, shape, status, confidence"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            )
+
+            for group in msg.traffic_light_groups:
+                group_id = group.traffic_light_group_id
+                for idx, element in enumerate(group.elements):
+                    data = (
+                        Config.DEFAULTS['vehicle_vin_code_default'],  # vehicle_vin_code
+                        Config.DEFAULTS['data_type_traffic_light_groups'],  # data_type
+                        datetime.now().date(),  # data_date
+                        datetime.fromtimestamp(msg.stamp.sec + msg.stamp.nanosec * 1e-9).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
+                        f"{msg.stamp.sec}.{msg.stamp.nanosec}",  # timestamp
+                        str(group_id),  # traffic_light_group_id
+                        str(idx + 1),  # element_id (第几个)
+                        self.map_color(element.color),  # color
+                        self.map_shape(element.shape),  # shape
+                        self.map_status(element.status),  # status
+                        str(element.confidence) if element.confidence else Config.DEFAULTS['confidence_default']  # confidence
+                    )
+                    cursor.execute(sql, data)
+
+            connection.commit()
+            self.get_logger().info('TrafficLightGroupArray data inserted into MySQL.')
+
+        except mysql.connector.Error as err:
+            self.get_logger().error(f"Failed to write TrafficLightGroupArray data to MySQL: {err}")
+
+        finally:
+            if connection.is_connected():
+                cursor.close()
+                connection.close()
+
+    # 定位表 Callback
+    def odometry_callback(self, msg: Odometry):
+        """
+        Callback function for Odometry data. Updates latest message and inserts data into MySQL.
+        Triggers write for '定位表'.
+        """
+        with self.lock:
+            self.latest_messages['/localization/kinematic_state'] = msg
+        self.insert_localization()
 
     def gnss_callback(self, msg: NavSatFix):
         """
-        Callback function for GNSS data. Stores the latest message.
+        Callback function for GNSS data. Updates latest message and inserts data into MySQL.
+        Triggers write for '定位表'.
         """
-        self.data_manager.update_message('gnss', msg)
-        self.get_logger().debug('Received new GNSS data.')
+        with self.lock:
+            self.latest_messages['/sensing/gnss/monitor'] = msg
+        self.insert_localization()
 
-    def trajectory_callback(self, msg: Trajectory):
+    def imu_callback(self, msg: Imu):
         """
-        Callback function for Trajectory data. Stores the latest message.
+        Callback function for IMU data. Updates latest message and inserts data into MySQL.
+        Triggers write for '定位表'.
         """
-        self.data_manager.update_message('trajectory', msg)
-        self.get_logger().debug('Received new Trajectory data.')
+        with self.lock:
+            self.latest_messages['/sensing/imu/imu_raw'] = msg
+        self.insert_localization()
 
-    def odometry_callback(self, msg: Odometry):
+    def insert_localization(self):
         """
-        Callback function for Odometry data. Stores the latest message.
+        Inserts data into '定位表' using the latest Odometry, GNSS, and IMU messages.
         """
-        self.data_manager.update_message('odometry', msg)
-        self.get_logger().debug('Received Odometry data.')
+        with self.lock:
+            odometry_msg: Odometry = self.latest_messages.get('/localization/kinematic_state')
+            gnss_msg: NavSatFix = self.latest_messages.get('/sensing/gnss/monitor')
+            imu_msg: Imu = self.latest_messages.get('/sensing/imu/imu_raw')
+
+        if not all([odometry_msg, gnss_msg, imu_msg]):
+            self.get_logger().warning('Insufficient Localization data available to insert.')
+            return
+
+        try:
+            yaw = self.quaternion_to_yaw(
+                odometry_msg.pose.pose.orientation.x,
+                odometry_msg.pose.pose.orientation.y,
+                odometry_msg.pose.pose.orientation.z,
+                odometry_msg.pose.pose.orientation.w
+            )
+
+            connection = self.config.DB_POOL.get_connection()
+            cursor = connection.cursor()
+
+            sql = (
+                "INSERT INTO `定位表` ("
+                "vehicle_vin_code, data_type, data_date, create_time, timestamp, vehicle_heading_angle, "
+                "lon, lat, lateral_acceleration, longitudinal_acceleration, gnss_state, imu_state, "
+                "x, y, z, o_lon, o_lat, o_h"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON DUPLICATE KEY UPDATE "
+                "vehicle_vin_code=VALUES(vehicle_vin_code), "
+                "data_type=VALUES(data_type), "
+                "data_date=VALUES(data_date), "
+                "create_time=VALUES(create_time), "
+                "vehicle_heading_angle=VALUES(vehicle_heading_angle), "
+                "lon=VALUES(lon), "
+                "lat=VALUES(lat), "
+                "lateral_acceleration=VALUES(lateral_acceleration), "
+                "longitudinal_acceleration=VALUES(longitudinal_acceleration), "
+                "gnss_state=VALUES(gnss_state), "
+                "imu_state=VALUES(imu_state), "
+                "x=VALUES(x), "
+                "y=VALUES(y), "
+                "z=VALUES(z), "
+                "o_lon=VALUES(o_lon), "
+                "o_lat=VALUES(o_lat), "
+                "o_h=VALUES(o_h)"
+            )
+
+            data = (
+                Config.DEFAULTS['vehicle_vin_code_default'],  # vehicle_vin_code
+                Config.DEFAULTS['data_type_localization'],  # data_type
+                datetime.now().date(),  # data_date
+                datetime.fromtimestamp(odometry_msg.header.stamp.sec + odometry_msg.header.stamp.nanosec * 1e-9).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
+                f"{odometry_msg.header.stamp.sec}.{odometry_msg.header.stamp.nanosec}",  # timestamp
+                str(yaw),  # vehicle_heading_angle
+                str(gnss_msg.longitude) if gnss_msg.longitude is not None else Config.DEFAULTS['lon_default'],  # lon
+                str(gnss_msg.latitude) if gnss_msg.latitude is not None else Config.DEFAULTS['lat_default'],    # lat
+                str(imu_msg.linear_acceleration.y) if imu_msg.linear_acceleration.y is not None else Config.DEFAULTS['lateral_acceleration_default'],  # lateral_acceleration
+                str(imu_msg.linear_acceleration.x) if imu_msg.linear_acceleration.x is not None else Config.DEFAULTS['longitudinal_acceleration_default'],  # longitudinal_acceleration
+                'ACTIVE' if odometry_msg.pose.covariance[1] else Config.DEFAULTS['gnss_state_default'],  # gnss_state
+                'ACTIVE' if odometry_msg.pose.covariance[2] else Config.DEFAULTS['imu_state_default'],  # imu_state
+                str(odometry_msg.pose.pose.position.x),  # x
+                str(odometry_msg.pose.pose.position.y),  # y
+                str(odometry_msg.pose.pose.position.z),  # z
+                Config.DEFAULTS['o_lon_default'],  # o_lon
+                Config.DEFAULTS['o_lat_default'],  # o_lat
+                Config.DEFAULTS['o_h_default']    # o_h
+            )
+
+            cursor.execute(sql, data)
+            connection.commit()
+            self.get_logger().info('定位表 (Localization) data inserted into MySQL.')
+
+        except mysql.connector.Error as err:
+            self.get_logger().error(f"Failed to write Localization data to MySQL: {err}")
+
+        finally:
+            if connection.is_connected():
+                cursor.close()
+                connection.close()
+
+    # 控制表 Callbacks
+    def gear_status_callback(self, msg: GearReport):
+        """
+        Callback function for Gear Status data. Updates latest message and inserts data into MySQL.
+        Triggers write for '控制表'.
+        """
+        with self.lock:
+            self.latest_messages['/vehicle/status/gear_status'] = msg
+        self.insert_control()
 
     def steering_status_callback(self, msg: SteeringReport):
         """
-        Callback function for Steering Status data. Stores the latest message.
+        Callback function for Steering Status data. Updates latest message and inserts data into MySQL.
+        Triggers write for '控制表'.
         """
-        self.data_manager.update_message('steering_status', msg)
-        self.get_logger().debug('Received Steering Status data.')
+        with self.lock:
+            self.latest_messages['/vehicle/status/steering_status'] = msg
+        self.insert_control()
 
-    # TODO: 添加更多的回调函数
-    # def other_callback(self, msg: OtherMsgType):
-    #     self.data_manager.update_message('other', msg)
+    def control_cmd_callback(self, msg: Control):
+        """
+        Callback function for Control Command data. Updates latest message and inserts data into MySQL.
+        Triggers write for '控制表'.
+        """
+        with self.lock:
+            self.latest_messages['/control/command/control_cmd'] = msg
+        self.insert_control()
 
-    def setup_insert_functions(self):
+    def turn_indicators_cmd_callback(self, msg: TurnIndicatorsCommand):
         """
-        Registers database insert functions.
+        Callback function for Turn Indicators Command data. Updates latest message and inserts data into MySQL.
+        Triggers write for '控制表'.
         """
-        self.insert_functions['gnss'] = self.insert_gnss_data_to_mysql
-        self.insert_functions['trajectory'] = self.insert_trajectory_data_to_mysql
-        self.insert_functions['odometry'] = self.insert_odometry_to_mysql
-        self.insert_functions['steering_status'] = self.insert_steering_status_to_mysql  # 注册新的插入函数
-        # TODO: 添加更多的插入函数，例如：
-        # self.insert_functions['other'] = self.insert_other_data_to_mysql
+        with self.lock:
+            self.latest_messages['/control/command/turn_indicators_cmd'] = msg
+        self.insert_control()
 
-    def timer_callback(self):
+    def hazard_lights_cmd_callback(self, msg: HazardLightsCommand):
         """
-        Timer callback that triggers all registered insert functions with a synchronized timestamp.
+        Callback function for Hazard Lights Command data. Updates latest message and inserts data into MySQL.
+        Triggers write for '控制表'.
         """
-        current_id = int(datetime.now().timestamp() * 1000)  # 使用当前时间戳（毫秒）
-        for name, insert_func in self.insert_functions.items():
-            insert_func(current_id)
+        with self.lock:
+            self.latest_messages['/control/command/hazard_lights_cmd'] = msg
+        self.insert_control()
 
-    def insert_gnss_data_to_mysql(self, current_id: int):
+    def emergency_cmd_callback(self, msg: VehicleEmergencyStamped):
         """
-        Inserts the latest GNSS data into the MySQL database using a synchronized timestamp as ID.
+        Callback function for Emergency Command data. Updates latest message and inserts data into MySQL.
+        Triggers write for '控制表'.
         """
-        msg: NavSatFix = self.data_manager.get_latest_message('gnss')
-        if msg is None:
-            self.get_logger().warning('No GNSS data available to insert.')
+        with self.lock:
+            self.latest_messages['/control/command/emergency_cmd'] = msg
+        self.insert_control()
+
+    def insert_control(self):
+        """
+        Inserts data into '控制表' using the latest GearReport, SteeringReport, Control, TurnIndicatorsCommand,
+        HazardLightsCommand, and VehicleEmergencyStamped messages.
+        """
+        with self.lock:
+            gear_msg: GearReport = self.latest_messages.get('/vehicle/status/gear_status')
+            steering_msg: SteeringReport = self.latest_messages.get('/vehicle/status/steering_status')
+            control_cmd_msg: Control = self.latest_messages.get('/control/command/control_cmd')
+            turn_light_msg: TurnIndicatorsCommand = self.latest_messages.get('/control/command/turn_indicators_cmd')
+            hazard_light_msg: HazardLightsCommand = self.latest_messages.get('/control/command/hazard_lights_cmd')
+            emergency_msg: VehicleEmergencyStamped = self.latest_messages.get('/control/command/emergency_cmd')
+
+        if not all([gear_msg, steering_msg, control_cmd_msg]):
+            self.get_logger().warning('Missing GearReport, SteeringReport, or Control Command data for Control table.')
             return
 
         try:
-            # 建立数据库连接
-            connection = mysql.connector.connect(**self.config.DB_CONFIG)
+            connection = self.config.DB_POOL.get_connection()
             cursor = connection.cursor()
 
-            # 插入数据的 SQL 语句，包含所有字段
             sql = (
-                "INSERT INTO `车辆定位信息表` ("
-                "guid, detection_id, vehicle_vin, vehicle_plate, longitude, latitude, "
-                "user_domain, user_query_domain, status, terminal_code, vehicle_type, flag, "
-                "create_time, modify_time, creater, modifer"
-                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-            )
+                "INSERT INTO `控制表` ("
+                "vehicle_vin_code, data_type, data_date, create_time, timestamp, gear, steering_tire_angle, "
+                "longitudinal_acceleration, turn_light, hazard_light, drive_mode, emergency"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                "ON DUPLICATE KEY UPDATE "
+                "gear=VALUES(gear), "
+                "steering_tire_angle=VALUES(steering_tire_angle), "
+                "longitudinal_acceleration=VALUES(longitudinal_acceleration), "
+                "turn_light=VALUES(turn_light), "
+                "hazard_light=VALUES(hazard_light), "
+                "drive_mode=VALUES(drive_mode), "
+                "emergency=VALUES(emergency)"
+                            )
+
+            # 自动驾驶模式指令，目前没有发布，写死为 '0'
+            drive_mode = Config.DEFAULTS['drive_mode_default']
+
+            # 急停指令
+            emergency = emergency_msg.emergency if emergency_msg and emergency_msg.emergency else Config.DEFAULTS['emergency_default']
+
+            timestamp_str = f"{gear_msg.stamp.sec}.{gear_msg.stamp.nanosec}"
 
             data = (
-                current_id,  # id（当前时间戳）
-                self.config.DEFAULTS['detection_id'],     # detection_id
-                self.config.DEFAULTS['vehicle_vin'],      # vehicle_vin
-                self.config.DEFAULTS['vehicle_plate'],    # vehicle_plate
-                msg.longitude if msg.longitude is not None else self.config.DEFAULTS['longitude_default'],  # 经度
-                msg.latitude if msg.latitude is not None else self.config.DEFAULTS['latitude_default'],    # 纬度
-                self.config.DEFAULTS['user_domain'],      # user_domain
-                self.config.DEFAULTS['user_query_domain'],# user_query_domain
-                self.config.DEFAULTS['status'],           # status
-                self.config.DEFAULTS['terminal_code'],    # terminal_code
-                self.config.DEFAULTS['vehicle_type'],     # vehicle_type
-                self.config.DEFAULTS['flag'],             # flag
-                datetime.fromtimestamp(current_id / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
-                datetime.fromtimestamp(current_id / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f'),  # modify_time
-                self.config.DEFAULTS['creater'],          # creater
-                self.config.DEFAULTS['modifer']           # modifer
+                Config.DEFAULTS['vehicle_vin_code_default'],  # vehicle_vin_code
+                Config.DEFAULTS['data_type_control'],  # data_type
+                datetime.now().date(),  # data_date
+                datetime.fromtimestamp(control_cmd_msg.stamp.sec + control_cmd_msg.stamp.nanosec * 1e-9).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
+                timestamp_str,  # timestamp
+                str(gear_msg.report),  # gear
+                str(steering_msg.steering_tire_angle) if steering_msg.steering_tire_angle is not None else Config.DEFAULTS['steering_tire_angle_default'],  # steering_tire_angle
+                str(control_cmd_msg.longitudinal.acceleration) if control_cmd_msg.longitudinal.acceleration is not None else Config.DEFAULTS['longitudinal_acceleration_default'],  # longitudinal_acceleration
+                self.map_turn_light(turn_light_msg.command) if turn_light_msg else Config.DEFAULTS['turn_light_default'],  # turn_light
+                self.map_hazard_light(hazard_light_msg.command) if hazard_light_msg else Config.DEFAULTS['hazard_light_default'],  # hazard_light
+                drive_mode,  # drive_mode
+                emergency  # emergency
             )
 
-            # 执行插入操作
             cursor.execute(sql, data)
-            connection.commit()  # 提交事务
-            self.get_logger().info('GNSS data inserted into MySQL.')
+            connection.commit()
+            self.get_logger().info('控制表 (Control) data inserted into MySQL.')
 
         except mysql.connector.Error as err:
-            # 捕获 MySQL 错误并打印日志
-            self.get_logger().error(f"Failed to write GNSS data to MySQL: {err}")
-            # 可以根据需求选择是否采取进一步措施，例如重试或报警
+            self.get_logger().error(f"Failed to write Control data to MySQL: {err}")
 
         finally:
-            # 确保关闭数据库连接和游标
             if connection.is_connected():
                 cursor.close()
                 connection.close()
 
-    def insert_trajectory_data_to_mysql(self, current_id: int):
+    # 决策规划表 Callback
+    def planning_trajectory_callback(self, msg: Trajectory):
         """
-        Inserts the latest Trajectory data into the MySQL database using a synchronized timestamp as ID.
+        Callback function for Planning Trajectory data. Inserts data into MySQL.
+        Splits the list of trajectory points into multiple records.
         """
-        msg: Trajectory = self.data_manager.get_latest_message('trajectory')
-        if msg is None:
-            self.get_logger().warning('No Trajectory data available to insert.')
+        with self.lock:
+            self.latest_messages['/planning/scenario_planning/trajectory'] = msg
+
+        if not msg.points:
+            self.get_logger().warning('Received Trajectory message with no points.')
             return
 
         try:
-            # 将 Trajectory 数据序列化为 JSON
-            trajectory_json = json.dumps(self.serialize_trajectory(msg), ensure_ascii=False)
-
-            # 建立数据库连接
-            connection = mysql.connector.connect(**self.config.DB_CONFIG)
+            connection = self.config.DB_POOL.get_connection()
             cursor = connection.cursor()
 
-            # 插入数据的 SQL 语句，包含所有字段
             sql = (
-                "INSERT INTO `车辆定位信息轨迹表` ("
-                "guid, vehicle_id, vehicle_plate, creater, create_time, modify_time, modifer, flag, "
-                "user_domain, user_query_domain, status, start_time, end_time, duration, path, "
-                "vehicle_vin, terminal_sim, factory, mileage, task_code, driver, contacts_name, vehicle_guid"
-                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                "INSERT INTO `决策规划表` ("
+                "vehicle_vin_code, data_type, data_date, create_time, timestamp, turn_light, hazard_light, "
+                "p_id, x, y, z, o_x, o_y, o_z, o_w, longitudinal_velocity_mps, lateral_velocity_mps, "
+                "acceleration_mps2, heading_rate_rps, front_wheel_angle_rad"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             )
 
-            data = (
-                current_id,  # id（当前时间戳）
-                self.config.DEFAULTS['vehicle_id'],        # vehicle_id
-                self.config.DEFAULTS['vehicle_plate'],     # vehicle_plate
-                self.config.DEFAULTS['creater'],          # creater
-                datetime.fromtimestamp(current_id / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
-                datetime.fromtimestamp(current_id / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f'),  # modify_time
-                self.config.DEFAULTS['modifer'],           # modifer
-                self.config.DEFAULTS['flag'],              # flag
-                self.config.DEFAULTS['user_domain'],       # user_domain
-                self.config.DEFAULTS['user_query_domain'], # user_query_domain
-                self.config.DEFAULTS['status'],            # status
-                self.config.DEFAULTS['start_time_default'],# start_time
-                self.config.DEFAULTS['end_time_default'],  # end_time
-                self.config.DEFAULTS['duration_default'],  # duration
-                trajectory_json,                            # path
-                self.config.DEFAULTS['vehicle_vin'],       # vehicle_vin
-                self.config.DEFAULTS['terminal_sim_default'],# terminal_sim
-                self.config.DEFAULTS['factory_default'],    # factory
-                None,                                       # mileage (填NULL)
-                self.config.DEFAULTS['task_code_default'], # task_code
-                self.config.DEFAULTS['driver_default'],    # driver
-                self.config.DEFAULTS['contacts_name_default'], # contacts_name
-                self.config.DEFAULTS['vehicle_guid_default']   # vehicle_guid
-            )
+            # 获取转向灯和应急灯状态
+            with self.lock:
+                turn_light_msg: TurnIndicatorsCommand = self.latest_messages.get('/control/command/turn_indicators_cmd')
+                hazard_light_msg: HazardLightsCommand = self.latest_messages.get('/control/command/hazard_lights_cmd')
 
-            # 执行插入操作
-            cursor.execute(sql, data)
-            connection.commit()  # 提交事务
-            self.get_logger().info('Trajectory data inserted into MySQL.')
+            turn_light = self.map_turn_light(turn_light_msg.command) if turn_light_msg else Config.DEFAULTS['turn_light_default']
+            hazard_light = self.map_hazard_light(hazard_light_msg.command) if hazard_light_msg else Config.DEFAULTS['hazard_light_default']
+
+            timestamp_str = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec}"
+
+            for idx, point in enumerate(msg.points):
+                p_id = str(idx + 1)  # 轨迹点id（第几个）
+                pose = point.pose
+                data = (
+                    Config.DEFAULTS['vehicle_vin_code_default'],  # vehicle_vin_code
+                    Config.DEFAULTS['data_type_decision_planning'],  # data_type
+                    datetime.now().date(),  # data_date
+                    datetime.fromtimestamp(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
+                    timestamp_str,  # timestamp
+                    turn_light,  # turn_light
+                    hazard_light,  # hazard_light
+                    p_id,  # p_id
+                    str(pose.position.x),  # x
+                    str(pose.position.y),  # y
+                    str(pose.position.z),  # z
+                    str(pose.orientation.x),  # o_x
+                    str(pose.orientation.y),  # o_y
+                    str(pose.orientation.z),  # o_z
+                    str(pose.orientation.w),  # o_w
+                    str(point.longitudinal_velocity_mps),  # longitudinal_velocity_mps
+                    str(point.lateral_velocity_mps),  # lateral_velocity_mps
+                    str(point.acceleration_mps2),  # acceleration_mps2
+                    str(point.heading_rate_rps),  # heading_rate_rps
+                    str(point.front_wheel_angle_rad)  # front_wheel_angle_rad
+                )
+                cursor.execute(sql, data)
+
+            connection.commit()
+            self.get_logger().info('决策规划表 (Decision Planning) data inserted into MySQL.')
 
         except mysql.connector.Error as err:
-            # 捕获 MySQL 错误并打印日志
-            self.get_logger().error(f"Failed to write Trajectory data to MySQL: {err}")
-            # 可以根据需求选择是否采取进一步措施，例如重试或报警
+            self.get_logger().error(f"Failed to write Decision Planning data to MySQL: {err}")
 
         finally:
-            # 确保关闭数据库连接和游标
             if connection.is_connected():
                 cursor.close()
                 connection.close()
 
-    def insert_odometry_to_mysql(self, current_id: int):
+    # 底盘表 Callback
+    def velocity_status_callback(self, msg: Any):
         """
-        Inserts the latest Odometry data into the MySQL database using a synchronized timestamp as ID.
+        Callback function for Velocity Status data. Inserts data into MySQL.
+        Assumes VelocityReport message type.
         """
-        msg: Odometry = self.data_manager.get_latest_message('odometry')
-        if msg is None:
-            self.get_logger().warning('No Odometry data available to insert.')
-            return
+        # 请根据实际的VelocityReport消息类型进行适配
+        # 假设 VelocityReport 包含以下字段：
+        # longitudinal_velocity, lateral_velocity, heading_rate
 
+        # 如果消息类型不同，请修改相应的字段提取方式
         try:
-            # 计算 yaw（航向角）从四元数
-            orientation = msg.pose.pose.orientation
-            yaw = self.quaternion_to_yaw(orientation.x, orientation.y, orientation.z, orientation.w)
+            longitudinal_velocity = getattr(msg, 'longitudinal_velocity', Config.DEFAULTS['longitudinal_velocity_default'])
+            lateral_velocity = getattr(msg, 'lateral_velocity', Config.DEFAULTS['lateral_velocity_default'])
+            heading_rate = getattr(msg, 'heading_rate', Config.DEFAULTS['heading_rate_default'])
 
-            # 建立数据库连接
-            connection = mysql.connector.connect(**self.config.DB_CONFIG)
+            connection = self.config.DB_POOL.get_connection()
             cursor = connection.cursor()
 
-            # 插入数据的 SQL 语句，包含所有字段
             sql = (
-                "INSERT INTO `车辆及自动驾驶数据记录系统基本信息表` ("
-                "id, data_uuid, vin, event_time, "
-                "automatic_driving_data_recording_system_hardware_version, "
-                "automatic_driving_data_recording_system_serial_num, "
-                "automatic_driving_data_recording_system_software_version, "
-                "event_type, event_record_complete_flag, accumulated_driving_distance, "
-                "vehicle_heading_angle, longitude, latitude, create_time, modify_time"
-                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                "INSERT INTO `底盘表` ("
+                "vehicle_vin_code, data_type, data_date, create_time, timestamp, longitudinal_velocity, "
+                "lateral_velocity, heading_rate"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
             )
+
+            # 使用当前时间作为时间戳
+            current_time = datetime.now()
+            timestamp_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')
 
             data = (
-                current_id,  # id（当前时间戳）
-                self.config.DEFAULTS['data_uuid_default'],  # data_uuid
-                self.config.DEFAULTS['vin_default'],         # vin
-                self.config.DEFAULTS['event_time_default'],  # event_time
-                self.config.DEFAULTS['automatic_driving_data_recording_system_hardware_version_default'],  # hardware_version
-                self.config.DEFAULTS['automatic_driving_data_recording_system_serial_num_default'],  # serial_num
-                self.config.DEFAULTS['automatic_driving_data_recording_system_software_version_default'],  # software_version
-                self.config.DEFAULTS['event_type_default'],   # event_type
-                self.config.DEFAULTS['event_record_complete_flag_default'],  # event_record_complete_flag
-                None,  # accumulated_driving_distance (填NULL)
-                yaw,   # vehicle_heading_angle
-                msg.pose.pose.position.x if msg.pose.pose.position.x is not None else self.config.DEFAULTS['longitude_default'],  # longitude
-                msg.pose.pose.position.y if msg.pose.pose.position.y is not None else self.config.DEFAULTS['latitude_default'],    # latitude
-                datetime.fromtimestamp(current_id / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
-                datetime.fromtimestamp(current_id / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')   # modify_time
+                Config.DEFAULTS['vehicle_vin_code_default'],  # vehicle_vin_code
+                Config.DEFAULTS['data_type_chassis'],  # data_type
+                current_time.date(),  # data_date
+                current_time.strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
+                timestamp_str,  # timestamp
+                str(longitudinal_velocity),  # longitudinal_velocity
+                str(lateral_velocity),  # lateral_velocity
+                str(heading_rate)  # heading_rate
             )
 
-            # 执行插入操作
             cursor.execute(sql, data)
-            connection.commit()  # 提交事务
-            self.get_logger().info('Odometry data inserted into MySQL.')
+            connection.commit()
+            self.get_logger().info('底盘表 (Chassis) data inserted into MySQL.')
 
         except mysql.connector.Error as err:
-            # 捕获 MySQL 错误并打印日志
-            self.get_logger().error(f"Failed to write Odometry data to MySQL: {err}")
-            # 可以根据需求选择是否采取进一步措施，例如重试或报警
+            self.get_logger().error(f"Failed to write Chassis data to MySQL: {err}")
 
         finally:
-            # 确保关闭数据库连接和游标
             if connection.is_connected():
                 cursor.close()
                 connection.close()
 
-    def insert_steering_status_to_mysql(self, current_id: int):
+    # ----------------- 辅助函数 -----------------
+
+    # 映射函数
+    def map_color(self, color_code: int) -> str:
         """
-        Inserts the latest Steering Status data into the MySQL database using a synchronized timestamp as ID.
+        Maps color code to string representation.
         """
-        msg: SteeringReport = self.data_manager.get_latest_message('steering_status')
-        if msg is None:
-            self.get_logger().warning('No Steering Status data available to insert.')
-            return
+        color_map = {
+            1: 'RED1',
+            2: 'AMBER2',
+            3: 'GREEN3',
+            4: 'WHITE4',
+            0: 'UNKNOWN'
+        }
+        return color_map.get(color_code, 'UNKNOWN')
 
-        try:
-            # 建立数据库连接
-            connection = mysql.connector.connect(**self.config.DB_CONFIG)
-            cursor = connection.cursor()
+    def map_shape(self, shape_code: int) -> str:
+        """
+        Maps shape code to string representation.
+        """
+        shape_map = {
+            1: '圆形',
+            2: '左箭头',
+            3: '右箭头',
+            4: '上箭头',
+            5: '上左箭头',
+            6: '上右箭头',
+            7: '下箭头',
+            8: '下左箭头',
+            9: '下右箭头',
+            10: '十字',
+            0: 'UNKNOWN'
+        }
+        return shape_map.get(shape_code, 'UNKNOWN')
 
-            # 插入数据的 SQL 语句，包含所有字段
-            sql = (
-                "INSERT INTO `驾驶员操作及状态信息表` ("
-                "id, data_uuid, vin, takeover_capability, wear_seat_belt_flag, driving_position_flag, "
-                "accelerator_pedal_angle, brake_pedal_angle, brake_pedal_status, steering_wheel_angle, "
-                "steering_torque, create_time, modify_time"
-                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-            )
+    def map_status(self, status_code: int) -> str:
+        """
+        Maps status code to string representation.
+        """
+        status_map = {
+            1: '熄火',
+            2: '常亮',
+            3: '闪烁',
+            0: 'UNKNOWN'
+        }
+        return status_map.get(status_code, 'UNKNOWN')
 
-            data = (
-                current_id,  # id（当前时间戳）
-                self.config.DEFAULTS['data_uuid_default'],          # data_uuid
-                self.config.DEFAULTS['vin_default'],                # vin
-                self.config.DEFAULTS['takeover_capability_default'], # takeover_capability
-                self.config.DEFAULTS['wear_seat_belt_flag_default'], # wear_seat_belt_flag
-                self.config.DEFAULTS['driving_position_flag_default'], # driving_position_flag
-                self.config.DEFAULTS['accelerator_pedal_angle_default'], # accelerator_pedal_angle
-                self.config.DEFAULTS['brake_pedal_angle_default'],   # brake_pedal_angle
-                self.config.DEFAULTS['brake_pedal_status_default'],  # brake_pedal_status
-                str(msg.steering_tire_angle) if msg.steering_tire_angle is not None else self.config.DEFAULTS['steering_wheel_angle_default'],  # steering_wheel_angle
-                self.config.DEFAULTS['steering_torque_default'],    # steering_torque
-                datetime.fromtimestamp(current_id / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
-                datetime.fromtimestamp(current_id / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f'),  # modify_time
-            )
+    def map_turn_light(self, command: int) -> str:
+        """
+        Maps turn light command to string representation.
+        """
+        turn_light_map = {
+            1: 'OFF',
+            2: 'LEFT',
+            3: 'RIGHT'
+        }
+        return turn_light_map.get(command, 'UNKNOWN')
 
-            # 执行插入操作
-            cursor.execute(sql, data)
-            connection.commit()  # 提交事务
-            self.get_logger().info('Steering Status data inserted into MySQL.')
-
-        except mysql.connector.Error as err:
-            # 捕获 MySQL 错误并打印日志
-            self.get_logger().error(f"Failed to write Steering Status data to MySQL: {err}")
-            # 可以根据需求选择是否采取进一步措施，例如重试或报警
-
-        finally:
-            # 确保关闭数据库连接和游标
-            if connection.is_connected():
-                cursor.close()
-                connection.close()
+    def map_hazard_light(self, command: int) -> str:
+        """
+        Maps hazard light command to string representation.
+        """
+        hazard_light_map = {
+            1: 'OFF',
+            2: 'ON'
+        }
+        return hazard_light_map.get(command, 'UNKNOWN')
 
     def quaternion_to_yaw(self, x, y, z, w) -> float:
         """
@@ -465,85 +766,10 @@ class Listener(Node):
         :param w: 四元数的 w 分量
         :return: 航向角 (Yaw)，单位为弧度
         """
-        # 计算航向角公式参考: https://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles
         siny_cosp = 2.0 * (w * z + x * y)
         cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
         yaw = math.atan2(siny_cosp, cosy_cosp)
         return yaw
-
-    def serialize_trajectory(self, msg: Trajectory) -> Dict[str, Any]:
-        """
-        Serializes the Trajectory message into a dictionary suitable for JSON storage.
-        """
-        return {
-            'header': {
-                'stamp': {
-                    'sec': msg.header.stamp.sec,
-                    'nanosec': msg.header.stamp.nanosec
-                },
-                'frame_id': msg.header.frame_id
-            },
-            'points': [
-                {
-                    'time_from_start': {
-                        'sec': point.time_from_start.sec,
-                        'nanosec': point.time_from_start.nanosec
-                    },
-                    'pose': {
-                        'position': {
-                            'x': point.pose.position.x,
-                            'y': point.pose.position.y,
-                            'z': point.pose.position.z
-                        },
-                        'orientation': {
-                            'x': point.pose.orientation.x,
-                            'y': point.pose.orientation.y,
-                            'z': point.pose.orientation.z,
-                            'w': point.pose.orientation.w
-                        }
-                    },
-                    'longitudinal_velocity_mps': point.longitudinal_velocity_mps,
-                    'lateral_velocity_mps': point.lateral_velocity_mps,
-                    'acceleration_mps2': point.acceleration_mps2,
-                    'heading_rate_rps': point.heading_rate_rps,
-                    'front_wheel_angle_rad': point.front_wheel_angle_rad,
-                    'rear_wheel_angle_rad': point.rear_wheel_angle_rad
-                }
-                for point in msg.points
-            ]
-        }
-
-    # TODO: 可以在这里添加更多的插入函数
-    # def insert_other_data_to_mysql(self, current_id: int):
-    #     msg = self.data_manager.get_latest_message('other')
-    #     if msg is None:
-    #         self.get_logger().warning('No other data available to insert.')
-    #         return
-    #     try:
-    #         connection = mysql.connector.connect(**self.config.DB_CONFIG)
-    #         cursor = connection.cursor()
-    #         sql = (
-    #             "INSERT INTO `其他表` ("
-    #             "id, other_field, create_time, modify_time, creater, modifer"
-    #             ") VALUES (%s, %s, %s, %s, %s, %s)"
-    #         )
-    #         data = (
-    #             current_id,  # id
-    #             msg.some_field,                          # other_field
-    #             datetime.fromtimestamp(current_id / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
-    #             datetime.fromtimestamp(current_id / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f'),  # modify_time
-    #             self.config.DEFAULTS['creater'],          # creater
-    #             self.config.DEFAULTS['modifer']           # modifer
-    #         )
-    #         cursor.execute(sql, data)
-    #         connection.commit()
-    #         self.get_logger().info('Other data inserted into MySQL.')
-    #     except mysql.connector.Error as err:
-    #         self.get_logger().error(f"Failed to write other data to MySQL: {err}")
-    #     finally:
-    #         if connection.is_connected():
-    #             cursor.close()
-    #             connection.close()
 
     def destroy_node(self):
         """
@@ -556,7 +782,7 @@ def main(args=None):
     The main entry point for the ROS 2 node.
     """
     rclpy.init(args=args)  # 初始化 ROS 2 Python 客户端库
-    listener = Listener(interval=5)  # 创建节点实例，默认每 5 秒写入一次
+    listener = Listener()  # 创建节点实例
     try:
         rclpy.spin(listener)  # 保持节点运行，等待消息
     except KeyboardInterrupt:
