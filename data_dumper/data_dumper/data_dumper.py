@@ -28,6 +28,7 @@ from sensor_msgs.msg import NavSatFix, Imu
 from nav_msgs.msg import Odometry
 from autoware_planning_msgs.msg import Trajectory
 from autoware_perception_msgs.msg import PredictedObjects, TrafficLightGroupArray
+from autoware_vehicle_msgs.msg import ControlModeReport, HazardLightsReport, TurnIndicatorsReport
 from autoware_vehicle_msgs.msg import (
     VelocityReport,
     GearReport,
@@ -41,7 +42,7 @@ import mysql.connector
 from mysql.connector import pooling
 from datetime import datetime
 from typing import Any, Dict
-import math
+import math,uuid
 import threading
 
 class Config:
@@ -213,7 +214,30 @@ class Listener(Node):
             self.velocity_status_callback,
             10)
         self.velocity_status_subscription
+        
+        self.control_mode_subscription = self.create_subscription(
+            ControlModeReport,
+            '/vehicle/status/control_mode',
+            self.control_mode_callback,
+            10
+        )
+        self.control_mode_subscription
 
+        self.turn_light_status_subscription = self.create_subscription(
+            TurnIndicatorsReport,
+            '/vehicle/status/turn_indicators_status',
+            self.turn_light_status_callback,
+            10
+        )
+        self.turn_light_status_subscription
+
+        self.hazard_lights_status_subscription = self.create_subscription(
+            HazardLightsReport,
+            '/vehicle/status/hazard_lights_status',
+            self.hazard_lights_status_callback,
+            10
+        )
+        self.hazard_lights_status_subscription
     # --------------- 回调函数和写入函数 ---------------
 
     # 激光雷达障碍物感知表 Callback
@@ -241,7 +265,7 @@ class Listener(Node):
             )
 
             for obstacle in msg.objects:
-                obstacle_id = str(obstacle.object_id) # 假设 `object_id` 是唯一标识符
+                obstacle_id = str(uuid.UUID(bytes=bytes(obstacle.object_id.uuid)))
                 data = (
                     Config.DEFAULTS['vehicle_vin_code_default'],  # vehicle_vin_code
                     Config.DEFAULTS['data_type_predicted_objects'],  # data_type
@@ -414,8 +438,8 @@ class Listener(Node):
                 str(gnss_msg.latitude) if gnss_msg.latitude is not None else Config.DEFAULTS['lat_default'],    # lat
                 str(imu_msg.linear_acceleration.y) if imu_msg.linear_acceleration.y is not None else Config.DEFAULTS['lateral_acceleration_default'],  # lateral_acceleration
                 str(imu_msg.linear_acceleration.x) if imu_msg.linear_acceleration.x is not None else Config.DEFAULTS['longitudinal_acceleration_default'],  # longitudinal_acceleration
-                'ACTIVE' if odometry_msg.pose.covariance[1] else Config.DEFAULTS['gnss_state_default'],  # gnss_state
-                'ACTIVE' if odometry_msg.pose.covariance[2] else Config.DEFAULTS['imu_state_default'],  # imu_state
+                odometry_msg.pose.covariance[1] if odometry_msg.pose.covariance[1] else Config.DEFAULTS['gnss_state_default'],  # gnss_state
+                odometry_msg.pose.covariance[2] if odometry_msg.pose.covariance[2] else Config.DEFAULTS['imu_state_default'],  # imu_state
                 str(odometry_msg.pose.pose.position.x),  # x
                 str(odometry_msg.pose.pose.position.y),  # y
                 str(odometry_msg.pose.pose.position.z),  # z
@@ -436,6 +460,43 @@ class Listener(Node):
                 cursor.close()
                 connection.close()
 
+    # 底盘表 Callbacks
+    def velocity_status_callback(self, msg: VelocityReport):
+        """
+        Callback function for Velocity Status data. Inserts data into MySQL.
+        Triggers write for '底盘表'.
+        """
+        with self.lock:
+            self.latest_messages['/vehicle/status/velocity_status'] = msg
+        self.insert_chassis()
+     
+    def control_mode_callback(self, msg: ControlModeReport):
+        """
+        Callback function for Control Mode data. Updates latest message and inserts data into MySQL.
+        Triggers write for '底盘表'.
+        """
+        with self.lock:
+            self.latest_messages['/vehicle/status/control_mode'] = msg
+        self.insert_chassis()
+
+    def turn_light_status_callback(self, msg: TurnIndicatorsReport):
+        """
+        Callback function for Hazard Lights Status data. Updates latest message and inserts data into MySQL.
+        Triggers write for '底盘表'.
+        """
+        with self.lock:
+            self.latest_messages['/vehicle/status/turn_indicators_status'] = msg
+        self.insert_chassis()
+
+    def hazard_lights_status_callback(self, msg: HazardLightsReport):
+        """
+        Callback function for Hazard Lights Status data. Updates latest message and inserts data into MySQL.
+        Triggers write for '底盘表'.
+        """
+        with self.lock:
+            self.latest_messages['/vehicle/status/hazard_lights_status'] = msg
+        self.insert_chassis()
+    
     # 控制表 Callbacks
     def gear_status_callback(self, msg: GearReport):
         """
@@ -490,6 +551,111 @@ class Listener(Node):
         with self.lock:
             self.latest_messages['/control/command/emergency_cmd'] = msg
         self.insert_control()
+    
+    # 底盘表插入
+    def insert_chassis(self):
+        """
+        Inserts data into '底盘表' using the latest VelocityReport and other related messages.
+        """
+        with self.lock:
+            velocity_msg: VelocityReport = self.latest_messages.get('/vehicle/status/velocity_status')
+            gear_msg: GearReport = self.latest_messages.get('/vehicle/status/gear_status')
+            steering_msg: SteeringReport = self.latest_messages.get('/vehicle/status/steering_status')
+            turn_light_status_msg: TurnIndicatorsReport = self.latest_messages.get('/vehicle/status/turn_indicators_status')
+            hazard_lights_status_msg: HazardLightsReport = self.latest_messages.get('/vehicle/status/hazard_lights_status')
+            control_mode_msg: ControlModeReport = self.latest_messages.get('/vehicle/status/control_mode')
+        
+        missing_msgs = []
+        if not velocity_msg:
+            missing_msgs.append('/vehicle/status/velocity_status')
+        if not gear_msg:
+            missing_msgs.append('/vehicle/status/gear_status')
+        if not steering_msg:
+            missing_msgs.append('/vehicle/status/steering_status')
+        if not turn_light_status_msg:
+            missing_msgs.append('/vehicle/status/turn_indicators_status')
+        if not hazard_lights_status_msg:
+            missing_msgs.append('/vehicle/status/hazard_lights_status')
+        if not control_mode_msg:
+            missing_msgs.append('/vehicle/status/control_mode')
+        
+        if missing_msgs:
+            self.get_logger().warning(f'Missing required messages for Chassis table: {", ".join(missing_msgs)}')
+            return
+        
+        try:
+            connection = self.config.DB_POOL.get_connection()
+            cursor = connection.cursor()
+        
+            sql = (
+                "INSERT INTO `底盘表` ("
+                "vehicle_vin_code, data_type, data_date, create_time, timestamp, gear, steering_tire_angle, "
+                "longitudinal_acceleration, turn_light, hazard_light, drive_mode, longitudinal_velocity, "
+                "lateral_velocity, heading_rate"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON DUPLICATE KEY UPDATE "
+                "gear=VALUES(gear), "
+                "steering_tire_angle=VALUES(steering_tire_angle), "
+                "longitudinal_acceleration=VALUES(longitudinal_acceleration), "
+                "turn_light=VALUES(turn_light), "
+                "hazard_light=VALUES(hazard_light), "
+                "drive_mode=VALUES(drive_mode), "
+                "longitudinal_velocity=VALUES(longitudinal_velocity), "
+                "lateral_velocity=VALUES(lateral_velocity), "
+                "heading_rate=VALUES(heading_rate)"
+            )
+        
+            # 自动驾驶模式指令，根据 ControlModeReport 映射
+            if control_mode_msg.mode == 1:
+                drive_mode = 'auto'
+            elif control_mode_msg.mode == 4:
+                drive_mode = 'manual'
+            else:
+                drive_mode = Config.DEFAULTS['drive_mode_default']
+        
+            # 急停指令
+            emergency = 'ON' if getattr(hazard_lights_status_msg, 'emergency', False) else Config.DEFAULTS['emergency_default']
+        
+            # 时间戳使用 VelocityReport 的时间
+            timestamp_str = f"{velocity_msg.header.stamp.sec}.{velocity_msg.header.stamp.nanosec}"
+        
+            # 挡位映射
+            gear_map = {
+                1: 'N',
+                2: 'D',
+                20: 'R',
+                22: 'P'
+            }
+            gear = gear_map.get(gear_msg.report, Config.DEFAULTS['gear_default'])
+        
+            data = (
+                Config.DEFAULTS['vehicle_vin_code_default'],  # vehicle_vin_code
+                Config.DEFAULTS['data_type_chassis'],         # data_type
+                datetime.now().date(),                       # data_date
+                datetime.fromtimestamp(velocity_msg.header.stamp.sec + velocity_msg.header.stamp.nanosec * 1e-9).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
+                timestamp_str,                               # timestamp
+                gear,                                        # gear
+                str(steering_msg.steering_tire_angle) if steering_msg.steering_tire_angle is not None else Config.DEFAULTS['steering_tire_angle_default'],  # steering_tire_angle
+                Config.DEFAULTS['longitudinal_acceleration_default'],  # longitudinal_acceleration (暂时未实现，加默认值)
+                self.map_turn_light(turn_light_status_msg.report),  # turn_light (如果没有对应的话题，可设为默认值或从其他地方获取)
+                self.map_hazard_light(hazard_lights_status_msg.report),  # hazard_light
+                drive_mode,                                  # drive_mode
+                str(velocity_msg.longitudinal_velocity) if hasattr(velocity_msg, 'longitudinal_velocity') else Config.DEFAULTS['longitudinal_velocity_default'],  # longitudinal_velocity
+                str(velocity_msg.lateral_velocity) if hasattr(velocity_msg, 'lateral_velocity') else Config.DEFAULTS['lateral_velocity_default'],             # lateral_velocity
+                str(velocity_msg.heading_rate) if hasattr(velocity_msg, 'heading_rate') else Config.DEFAULTS['heading_rate_default'],                         # heading_rate
+            )
+        
+            cursor.execute(sql, data)
+            connection.commit()
+            self.get_logger().info('底盘表 (Chassis) data inserted into MySQL.')
+        
+        except mysql.connector.Error as err:
+            self.get_logger().error(f"Failed to write Chassis data to MySQL: {err}")
+        
+        finally:
+            if connection.is_connected():
+                cursor.close()
+                connection.close()
 
     def insert_control(self):
         """
@@ -534,6 +700,15 @@ class Listener(Node):
             emergency = emergency_msg.emergency if emergency_msg and emergency_msg.emergency else Config.DEFAULTS['emergency_default']
 
             timestamp_str = f"{gear_msg.stamp.sec}.{gear_msg.stamp.nanosec}"
+            
+            # 挡位映射
+            gear_map = {
+                1: 'N',
+                2: 'D',
+                20: 'R',
+                22: 'P'
+            }
+            gear = gear_map.get(gear_msg.report, Config.DEFAULTS['gear_default'])
 
             data = (
                 Config.DEFAULTS['vehicle_vin_code_default'],  # vehicle_vin_code
@@ -541,7 +716,7 @@ class Listener(Node):
                 datetime.now().date(),  # data_date
                 datetime.fromtimestamp(control_cmd_msg.stamp.sec + control_cmd_msg.stamp.nanosec * 1e-9).strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
                 timestamp_str,  # timestamp
-                str(gear_msg.report),  # gear
+                str(gear),  # gear
                 str(steering_msg.steering_tire_angle) if steering_msg.steering_tire_angle is not None else Config.DEFAULTS['steering_tire_angle_default'],  # steering_tire_angle
                 str(control_cmd_msg.longitudinal.acceleration) if control_cmd_msg.longitudinal.acceleration is not None else Config.DEFAULTS['longitudinal_acceleration_default'],  # longitudinal_acceleration
                 self.map_turn_light(turn_light_msg.command) if turn_light_msg else Config.DEFAULTS['turn_light_default'],  # turn_light
@@ -635,61 +810,24 @@ class Listener(Node):
                 cursor.close()
                 connection.close()
 
-    # 底盘表 Callback
-    def velocity_status_callback(self, msg: Any):
-        """
-        Callback function for Velocity Status data. Inserts data into MySQL.
-        Assumes VelocityReport message type.
-        """
-        # 请根据实际的VelocityReport消息类型进行适配
-        # 假设 VelocityReport 包含以下字段：
-        # longitudinal_velocity, lateral_velocity, heading_rate
-
-        # 如果消息类型不同，请修改相应的字段提取方式
-        try:
-            longitudinal_velocity = getattr(msg, 'longitudinal_velocity', Config.DEFAULTS['longitudinal_velocity_default'])
-            lateral_velocity = getattr(msg, 'lateral_velocity', Config.DEFAULTS['lateral_velocity_default'])
-            heading_rate = getattr(msg, 'heading_rate', Config.DEFAULTS['heading_rate_default'])
-
-            connection = self.config.DB_POOL.get_connection()
-            cursor = connection.cursor()
-
-            sql = (
-                "INSERT INTO `底盘表` ("
-                "vehicle_vin_code, data_type, data_date, create_time, timestamp, longitudinal_velocity, "
-                "lateral_velocity, heading_rate"
-                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
-            )
-
-            # 使用当前时间作为时间戳
-            current_time = datetime.now()
-            timestamp_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')
-
-            data = (
-                Config.DEFAULTS['vehicle_vin_code_default'],  # vehicle_vin_code
-                Config.DEFAULTS['data_type_chassis'],  # data_type
-                current_time.date(),  # data_date
-                current_time.strftime('%Y-%m-%d %H:%M:%S.%f'),  # create_time
-                timestamp_str,  # timestamp
-                str(longitudinal_velocity),  # longitudinal_velocity
-                str(lateral_velocity),  # lateral_velocity
-                str(heading_rate)  # heading_rate
-            )
-
-            cursor.execute(sql, data)
-            connection.commit()
-            self.get_logger().info('底盘表 (Chassis) data inserted into MySQL.')
-
-        except mysql.connector.Error as err:
-            self.get_logger().error(f"Failed to write Chassis data to MySQL: {err}")
-
-        finally:
-            if connection.is_connected():
-                cursor.close()
-                connection.close()
-
     # ----------------- 辅助函数 -----------------
+    def generate_obstacle_id(self, uuid_bytes: bytes) -> str:
+        """
+        Generates a UUID string from bytes.
 
+        :param uuid_bytes: UUID bytes from obstacle.object_id.uuid
+        :return: String representation of UUID
+        """
+        try:
+            # 假设 uuid_bytes 是16字节
+            if len(uuid_bytes) != 16:
+                raise ValueError("UUID bytes length is not 16.")
+            obstacle_uuid = uuid.UUID(bytes=bytes(uuid_bytes))
+            return str(obstacle_uuid)
+        except Exception as e:
+            self.get_logger().error(f"Failed to generate obstacle_id from UUID bytes: {e}")
+            return '00000000-0000-0000-0000-000000000000'  # 默认UUID
+     
     # 映射函数
     def map_color(self, color_code: int) -> str:
         """
