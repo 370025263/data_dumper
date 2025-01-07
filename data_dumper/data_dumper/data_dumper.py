@@ -6,19 +6,19 @@ README
 1. 订阅各个ROS话题。
 2. 当单个话题有新消息时，立即将其数据写入对应的MySQL表。
 3. 对于由多个话题组成的表（定位表、控制表），任何一个构成话题有新消息时，立即将整个表的数据写入MySQL，使用所有相关话题的最新数据。
-4. 移除驾驶员操作及状态信息表，仅保留六个表。
+4. 六个表:"激光雷达障碍物感知表，信号灯感知表，定位表，控制表，决策规划表，底盘表".
 5. 使用数据库连接池优化MySQL连接管理。
 
 使用方法：
 1. 确保已安装必要的Python库：
     ```bash
-    pip install rclpy mysql-connector-python
+    pip install mysql-connector-python
     ```
 2. 根据实际情况修改Config类中的数据库配置和默认值。
 3. 确保MySQL中已创建所需的六个表，且字段类型与代码中的插入逻辑一致。
 4. 启动ROS 2节点：
     ```bash
-    python3 data_dumper.py
+    bash start.sh
     ```
 """
 
