@@ -24,6 +24,117 @@ stone/autoware_data_dumper/
 文彬讲我们最好是每天拷贝，那就需要你把/home/casia/stone/autoware_data_dumper/2025xxxxxx-xx-xx-xx_database.sql.gz 拷贝到自己U盘。
 U盘需要插在车后备箱的工控机上，然后手动复制过去。
 
+# 表格实现逻辑
+**激光雷达障碍物感知表（列表拆分）**  
+- **话题**：`/perception/object_recognition/objects` (`PredictedObjects`)  
+- **拆分逻辑**：`msg.objects` 可能包含多个障碍物，每个障碍物生成一条记录。  
+- **字段来源**：  
+  - `vehicle_vin_code`：从 `Config.DEFAULTS` 读取写死的默认值  
+  - `data_type`：写死为 `PredictedObjects`  
+  - `data_date`：使用系统当前日期  
+  - `create_time`：使用 `msg.header.stamp` 转为人类可读时间  
+  - `timestamp`：将 `msg.header.stamp.sec` 和 `msg.header.stamp.nanosec` 拼接成字符串  
+  - `obstacle_id`：用障碍物的 `object_id.uuid` 生成 UUID 字符串  
+  - `type`：来自 `obstacle.classification[0].label`，若取不到则用默认值  
+  - `pos_x`、`pos_y`：来自 `obstacle.kinematics.initial_pose_with_covariance.pose.position.x / y`  
+  - `height`、`width`、`length`：来自 `obstacle.shape.dimensions.z / y / x`  
+
+**信号灯感知表（列表拆分）**  
+- **话题**：`/perception/traffic_light_recognition/traffic_signals` (`TrafficLightGroupArray`)  
+- **拆分逻辑**：`msg.traffic_light_groups` 下的每个 group 可能包含多个 element，每个 element 生成一条记录。  
+- **字段来源**：  
+  - `vehicle_vin_code`：默认值  
+  - `data_type`：写死为 `TrafficLightGroupArray`  
+  - `data_date`：系统当前日期  
+  - `create_time`：用 `msg.stamp` 转为人类可读时间  
+  - `timestamp`：`msg.stamp.sec.nanosec` 形式  
+  - `traffic_light_group_id`：`group.traffic_light_group_id` (目前仅返回 0)  
+  - `element_id`：在同一组里，第几个灯（索引+1）  
+  - `color`：`element.color`，用映射函数转换为 `RED1/AMBER2/GREEN3/WHITE4`，若取不到则 UNKNOWN  
+  - `shape`：`element.shape`，映射为形状字符串，若取不到则 UNKNOWN  
+  - `status`：`element.status`，映射为 `熄火/常亮/闪烁`，若取不到则 UNKNOWN  
+  - `confidence`：`element.confidence`，若取不到则写默认值  
+
+**定位表（单条写入）**  
+- **话题**：  
+  - `/localization/kinematic_state` (`Odometry`)：提供航向角（由四元数计算）、XYZ、GNSS 运行状态（pose.covariance[1]）、IMU 运行状态（pose.covariance[2]）  
+  - `/sensing/gnss/monitor` (`NavSatFix`)：提供 `latitude`、`longitude`  
+  - `/sensing/imu/imu_raw` (`Imu`)：提供 `linear_acceleration.x/y`  
+- **写入时机**：上面三个话题任何一个更新时，就尝试用最新消息写表  
+- **字段来源**：  
+  - `vehicle_vin_code`：默认值  
+  - `data_type`：写死 `Localization`  
+  - `data_date`：系统当前日期  
+  - `create_time`、`timestamp`：来自 `Odometry` 消息的 header.stamp  
+  - `vehicle_heading_angle`：由四元数转 yaw 得到  
+  - `lon`/`lat`：`NavSatFix.longitude / latitude`，若没取到则默认值  
+  - `lateral_acceleration`/`longitudinal_acceleration`：`Imu.linear_acceleration.y / x`，若没取到则默认值  
+  - `gnss_state`/`imu_state`：来自 `Odometry.pose.covariance[1] / [2]`，若为空则默认  
+  - `x`/`y`/`z`：来自 `Odometry.pose.pose.position.x/y/z`  
+  - `o_lon/o_lat/o_h`：写死为 `119.69281743/25.4804208/36.488`  
+
+**控制表（单条写入）**  
+- **话题**：  
+  - 档位：`/vehicle/status/gear_status` (`GearReport`)  
+  - 前轮转角：`/vehicle/status/steering_status` (`SteeringReport`)  
+  - 纵向加速度：`/control/command/control_cmd` (`Control`) 中的 `longitudinal.acceleration`  
+  - 转向灯：`/control/command/turn_indicators_cmd` (`TurnIndicatorsCommand`)  
+  - 紧急灯：`/control/command/hazard_lights_cmd` (`HazardLightsCommand`)  
+  - 自动驾驶模式指令：目前代码写死为 `0`（话题未发布）  
+  - 急停：`/control/command/emergency_cmd` (`VehicleEmergencyStamped`)  
+- **写入时机**：任意一个必要话题更新，就用最新数据写一条记录  
+- **字段来源**：  
+  - `vehicle_vin_code`：默认值  
+  - `data_type`：写死为 `Control`  
+  - `data_date`：系统当前日期  
+  - `create_time`：用 `Control` 消息的时间戳转换  
+  - `timestamp`：用 `GearReport` 消息时间戳作主键  
+  - `gear`：`GearReport.report` 映射为 `1N,2D,20R,22P`  
+  - `steering_tire_angle`：`SteeringReport.steering_tire_angle`  
+  - `longitudinal_acceleration`：`Control.longitudinal.acceleration`  
+  - `turn_light`：`TurnIndicatorsCommand.command` 映射为 `1off,2left,3right`  
+  - `hazard_light`：`HazardLightsCommand.command` 映射为 `1off,2on`  
+  - `drive_mode`：暂时写死为 `0`  
+  - `emergency`：`VehicleEmergencyStamped.emergency` 布尔值转换为字符串  
+
+**决策规划表（列表拆分）**  
+- **话题**：`/planning/scenario_planning/trajectory` (`Trajectory`)  
+- **拆分逻辑**：`msg.points` 中每个点都写入一条记录  
+- **字段来源**：  
+  - `vehicle_vin_code`：默认值  
+  - `data_type`：写死为 `DecisionPlanning`  
+  - `data_date`：系统当前日期  
+  - `create_time`、`timestamp`：用 `msg.header.stamp` 转为时间字符串  
+  - `turn_light` / `hazard_light`：当前在代码中用 `TurnIndicatorsCommand` 和 `HazardLightsCommand` 最新指令映射  
+  - `p_id`：轨迹点序号（从 1 开始）  
+  - `x/y/z`：`TrajectoryPoint.pose.position`  
+  - `o_x/o_y/o_z/o_w`：`TrajectoryPoint.pose.orientation`  
+  - `longitudinal_velocity_mps` / `lateral_velocity_mps` / `acceleration_mps2` / `heading_rate_rps` / `front_wheel_angle_rad`：均直接取自每个轨迹点  
+
+**底盘表（单条写入）**  
+- **话题**：  
+  - 档位：`/vehicle/status/gear_status` (`GearReport`)  
+  - 前轮转角：`/vehicle/status/steering_status` (`SteeringReport`)  
+  - 纵向加速度：目前置空，尚无对应实现  
+  - 转向灯、紧急灯：`/vehicle/status/turn_indicators_status`、`/vehicle/status/hazard_lights_status` (或合并在同一消息)  
+  - 自动驾驶模式：`/vehicle/status/control_mode` (`ControlModeReport.mode`) 映射为 `1auto,4manual`  
+  - 纵向、横向速度、航向角变化率：`/vehicle/status/velocity_status` (`VelocityReport`) 中的 `longitudinal_velocity`, `lateral_velocity`, `heading_rate`  
+- **写入时机**：任意必要话题更新，就使用所有最新值写一条记录  
+- **字段来源**：  
+  - `vehicle_vin_code`：默认值  
+  - `data_type`：写死为 `Chassis`  
+  - `data_date`：系统当前日期  
+  - `create_time`、`timestamp`：使用 `VelocityReport` 时间戳  
+  - `gear`：`GearReport.report` 映射  
+  - `steering_tire_angle`：`SteeringReport.steering_tire_angle`  
+  - `longitudinal_acceleration`：暂时未实现  
+  - `turn_light` / `hazard_light`：从相应的 status 消息取 `report` 并映射  
+  - `drive_mdoe`：由 `ControlModeReport.mode` 映射  
+  - `longitudinal_velocity` / `lateral_velocity` / `heading_rate`：`VelocityReport` 中对应字段，若取不到则默认  
+
+上述各表记录的写入逻辑均参考代码里的回调函数，话题一旦发布新的消息，就会更新最新数据并写入数据库。若某些字段取不到值或未发布对应话题，则使用默认值或不写入。
+
+
 
 # 新增或修改表格字段
 确定字段需求
